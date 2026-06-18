@@ -1,107 +1,537 @@
 # -*- coding: utf-8 -*-
 """
-Markdown Formatting Helpers
------------------------------
-TURKPATENT API'sinin döndürdüğü item şeması dokümante edilmediği için bu
-modül "şema bağımsız" çalışır: mümkünse API'nin verdiği `fields` meta verisini
-kullanır, yoksa ilk sonucun anahtarlarından otomatik kolon türetir.
+TURKPATENT MCP Server (Extended)
+-----------------------------------
+MCP server for searching Turkish trademarks, patents, and designs
+on turkpatent.gov.tr using FastMCP.
+
+Usage:
+    python mcp_server.py          # Direct run (stdio)
+    fastmcp dev mcp_server.py     # Development mode
+    fastmcp run mcp_server.py     # Production mode
 """
 
-from typing import Any, Optional
+from typing import Optional, Literal, Annotated, Union
 
-MAX_COLUMNS = 6
-MAX_CELL_LEN = 60
+from fastmcp import FastMCP, Context
+from pydantic import Field
 
+from core import (
+    search_trademarks_core,
+    get_trademark_detail_core,
+    batch_search_trademarks_core,
+    search_patents_core,
+    get_patent_detail_core,
+    batch_search_patents_core,
+    search_designs_core,
+    get_design_detail_core,
+    create_watch_core,
+    list_watches_core,
+    delete_watch_core,
+    check_watch_core,
+    check_all_watches_core,
+)
+from formatting import (
+    format_search_result_as_markdown,
+    format_batch_results_as_markdown,
+    format_watch_check_as_markdown,
+)
 
-def _pick_columns(items: list, fields: Optional[list]) -> list:
-    """[(key, label), ...] biçiminde gösterilecek kolonları belirler."""
-    if fields:
-        cols = []
-        for f in fields:
-            if isinstance(f, dict):
-                key = f.get("field") or f.get("name") or f.get("key") or f.get("id")
-                label = f.get("label") or f.get("title") or f.get("header") or key
-            else:
-                key = label = str(f)
-            if key:
-                cols.append((key, label))
-        if cols:
-            return cols[:MAX_COLUMNS]
+OutputFormat = Literal["json", "markdown"]
 
-    if items:
-        cols = []
-        for k, v in items[0].items():
-            if isinstance(v, (dict, list)):
-                continue
-            cols.append((k, k))
-        return cols[:MAX_COLUMNS]
+# --- FastMCP Server ---
 
-    return []
+mcp = FastMCP(
+    name="TURKPATENT MCP+",
+    instructions="""
+TURKPATENT Trademark, Patent and Design Search MCP Server (Extended).
 
+This server provides access to the Turkish Patent and Trademark Office
+(turkpatent.gov.tr) research database, plus:
+  - Date / bulletin filters on search
+  - Batch search across multiple names/titles
+  - Bulletin watch tracking (detect newly published applications)
+  - Optional Markdown-formatted output for chat-friendly summaries
 
-def _cell(value: Any) -> str:
-    if value is None or value == "":
-        return "-"
-    text = str(value).replace("|", "/").replace("\n", " ").strip()
-    if len(text) > MAX_CELL_LEN:
-        text = text[: MAX_CELL_LEN - 1] + "…"
-    return text
-
-
-def format_search_result_as_markdown(result: dict, title: str = "Arama Sonuçları") -> str:
-    """Bir search_*_core() çıktısını Markdown tabloya çevirir."""
-    items = result.get("items", [])
-    total = result.get("total", len(items))
-    fields = result.get("fields", [])
-
-    lines = [f"### {title}", f"**Toplam:** {total} | **Bu sayfada:** {len(items)}", ""]
-
-    if "error" in result:
-        lines.append(f"⚠️ **Hata:** {result['error']}")
-        return "\n".join(lines)
-
-    if not items:
-        lines.append("_Sonuç bulunamadı._")
-        return "\n".join(lines)
-
-    cols = _pick_columns(items, fields)
-    if not cols:
-        lines.append("_Sonuçlar gösterilemedi (alan bilgisi çözümlenemedi, output_format='json' deneyin)._")
-        return "\n".join(lines)
-
-    header = " | ".join(label for _, label in cols)
-    sep = " | ".join("---" for _ in cols)
-    lines.append(f"| {header} |")
-    lines.append(f"| {sep} |")
-    for item in items:
-        row = [_cell(item.get(key)) for key, _ in cols]
-        lines.append("| " + " | ".join(row) + " |")
-
-    return "\n".join(lines)
+All searches support pagination. Detail queries return full application
+information. Automatically handles reCAPTCHA protection via Capsolver.
+""",
+)
 
 
-def format_batch_results_as_markdown(results: dict, title: str = "Toplu Arama Sonuçları") -> str:
-    """batch_search_*_core() çıktısını (query -> result dict) Markdown'a çevirir."""
-    sections = [f"## {title}", ""]
-    for query, result in results.items():
-        sections.append(format_search_result_as_markdown(result, title=f"'{query}'"))
-        sections.append("")
-    return "\n".join(sections)
+# --- Trademark Tools ---
+
+@mcp.tool
+async def search_trademarks(
+    trademark_name: Annotated[str, Field(description="Trademark name to search for")] = "",
+    name_operator: Annotated[
+        Literal["contains", "startsWith", "equals"],
+        Field(description="Search operator for trademark name"),
+    ] = "contains",
+    holder_name: Annotated[Optional[str], Field(description="Trademark holder/applicant name")] = None,
+    holder_name_operator: Annotated[
+        Literal["startsWith", "equals"],
+        Field(description="Search operator for holder name"),
+    ] = "startsWith",
+    nice_classes: Annotated[
+        Optional[str], Field(description="Nice classification codes, comma-separated (e.g. '9,35,42')")
+    ] = None,
+    bulletin_no: Annotated[
+        Optional[str], Field(description="Resmi Marka Bülteni numarası ile filtrele")
+    ] = None,
+    limit: Annotated[int, Field(ge=1, le=100, description="Results per page")] = 20,
+    offset: Annotated[int, Field(ge=0, description="Pagination offset")] = 0,
+    output_format: Annotated[OutputFormat, Field(description="'json' (raw) or 'markdown' (chat-friendly table)")] = "json",
+    ctx: Context = None,
+) -> Union[dict, str]:
+    """
+    Search trademarks registered in Turkey on TURKPATENT.
+
+    Returns a list of matching trademarks with application number, name, holder,
+    status, Nice classes, and application date.
+
+    Examples:
+    - search_trademarks(trademark_name="Apple")
+    - search_trademarks(trademark_name="Samsung", nice_classes="9,35")
+    - search_trademarks(holder_name="VESTEL")
+    - search_trademarks(trademark_name="Apple", output_format="markdown")
+    """
+    if ctx:
+        await ctx.info(f"Searching trademarks: '{trademark_name or '*'}' (offset={offset})")
+    try:
+        result = await search_trademarks_core(
+            trademark_name=trademark_name,
+            name_operator=name_operator,
+            holder_name=holder_name,
+            holder_name_operator=holder_name_operator,
+            nice_classes=nice_classes,
+            bulletin_no=bulletin_no,
+            limit=limit,
+            offset=offset,
+        )
+        if ctx:
+            await ctx.info(f"Found {len(result.get('items', []))} trademarks (total: {result.get('total', 0)})")
+        if output_format == "markdown":
+            return format_search_result_as_markdown(result, title=f"Marka Araması: {trademark_name or '*'}")
+        return result
+    except Exception as e:
+        error_msg = f"Trademark search error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        error_result = {"error": error_msg, "total": 0, "items": []}
+        if output_format == "markdown":
+            return format_search_result_as_markdown(error_result)
+        return error_result
 
 
-def format_watch_check_as_markdown(check_result: dict) -> str:
-    """check_watch_core() çıktısını Markdown'a çevirir."""
-    lines = [
-        f"### 🔔 Takip: {check_result.get('label', check_result.get('watch_id'))}",
-        f"**Tarandı:** {check_result.get('checked_total', 0)} sonuç | "
-        f"**Yeni:** {check_result.get('new_count', 0)}",
-        "",
-    ]
-    new_items = check_result.get("new_items", [])
-    if not new_items:
-        lines.append("_Son kontrolden bu yana yeni başvuru yok._")
-        return "\n".join(lines)
+@mcp.tool
+async def get_trademark_details(
+    application_number: Annotated[str, Field(description="Trademark application number (e.g. 'T/01853', '2020/12345')")],
+    ctx: Context = None,
+) -> dict:
+    """
+    Get detailed information about a specific trademark application.
 
-    fake_result = {"items": new_items, "total": len(new_items), "fields": check_result.get("fields", [])}
-    lines.append(format_search_result_as_markdown(fake_result, title="Yeni Başvurular"))
-    return "\n".join(lines)
+    Returns mark information including name, holder, Nice classes, application date,
+    registration status, bulletin numbers, and protection dates.
+    """
+    if ctx:
+        await ctx.info(f"Fetching trademark details: {application_number}")
+    try:
+        result = await get_trademark_detail_core(application_number)
+        if ctx:
+            await ctx.info("Trademark details retrieved")
+        return result
+    except Exception as e:
+        error_msg = f"Trademark detail error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return {"error": error_msg}
+
+
+@mcp.tool
+async def batch_search_trademarks(
+    trademark_names: Annotated[list, Field(description="Aranacak marka adlarının listesi, örn. ['Apple', 'Samsung', 'Vestel']")],
+    name_operator: Annotated[Literal["contains", "startsWith", "equals"], Field(description="Search operator")] = "contains",
+    holder_name: Annotated[Optional[str], Field(description="Tüm sorgulara uygulanacak ortak hak sahibi filtresi")] = None,
+    nice_classes: Annotated[Optional[str], Field(description="Tüm sorgulara uygulanacak ortak Nice sınıfı filtresi")] = None,
+    limit_per_query: Annotated[int, Field(ge=1, le=50, description="Her bir marka adı için döndürülecek sonuç sayısı")] = 10,
+    output_format: Annotated[OutputFormat, Field(description="'json' or 'markdown'")] = "json",
+    ctx: Context = None,
+) -> Union[dict, str]:
+    """
+    Birden fazla marka adını TEK seferde, eş zamanlı olarak arar.
+
+    Examples:
+    - batch_search_trademarks(trademark_names=["Apple", "Samsung", "Vestel"])
+    - batch_search_trademarks(trademark_names=["Migros", "CarrefourSA"], nice_classes="35")
+    """
+    if ctx:
+        await ctx.info(f"Batch searching {len(trademark_names)} trademark names...")
+    try:
+        results = await batch_search_trademarks_core(
+            trademark_names=trademark_names,
+            name_operator=name_operator,
+            holder_name=holder_name,
+            nice_classes=nice_classes,
+            limit=limit_per_query,
+        )
+        if ctx:
+            await ctx.info("Batch search complete")
+        if output_format == "markdown":
+            return format_batch_results_as_markdown(results, title="Toplu Marka Araması")
+        return results
+    except Exception as e:
+        error_msg = f"Batch trademark search error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return {"error": error_msg}
+
+
+# --- Patent Tools ---
+
+@mcp.tool
+async def search_patents(
+    title: Annotated[str, Field(description="Invention title to search for")] = "",
+    abstract: Annotated[Optional[str], Field(description="Invention abstract keywords")] = None,
+    owner: Annotated[Optional[str], Field(description="Inventor name")] = None,
+    applicant: Annotated[Optional[str], Field(description="Patent applicant name")] = None,
+    application_number: Annotated[Optional[str], Field(description="Patent application number")] = None,
+    ipc_class: Annotated[Optional[str], Field(description="IPC classification code")] = None,
+    cpc_class: Annotated[Optional[str], Field(description="CPC classification code")] = None,
+    attorney: Annotated[Optional[str], Field(description="Patent attorney name")] = None,
+    bulletin_date_from: Annotated[Optional[str], Field(description="Bülten başlangıç tarihi 'YYYY-MM-DD'")] = None,
+    bulletin_date_to: Annotated[Optional[str], Field(description="Bülten bitiş tarihi 'YYYY-MM-DD'")] = None,
+    limit: Annotated[int, Field(ge=1, le=100, description="Results per page")] = 20,
+    offset: Annotated[int, Field(ge=0, description="Pagination offset")] = 0,
+    output_format: Annotated[OutputFormat, Field(description="'json' or 'markdown'")] = "json",
+    ctx: Context = None,
+) -> Union[dict, str]:
+    """
+    Search patents registered in Turkey on TURKPATENT.
+
+    Returns matching patents with application number, title, applicant,
+    IPC class, and publication date.
+
+    Examples:
+    - search_patents(title="yapay zeka")
+    - search_patents(applicant="ASELSAN")
+    - search_patents(ipc_class="G06F")
+    - search_patents(applicant="ASELSAN", bulletin_date_from="2025-01-01", bulletin_date_to="2025-12-31")
+    """
+    if ctx:
+        await ctx.info(f"Searching patents: '{title or '*'}' (offset={offset})")
+    try:
+        result = await search_patents_core(
+            title=title,
+            abstract=abstract,
+            owner=owner,
+            applicant=applicant,
+            application_number=application_number,
+            ipc_class=ipc_class,
+            cpc_class=cpc_class,
+            attorney=attorney,
+            bulletin_date_from=bulletin_date_from,
+            bulletin_date_to=bulletin_date_to,
+            limit=limit,
+            offset=offset,
+        )
+        if ctx:
+            await ctx.info(f"Found {len(result.get('items', []))} patents (total: {result.get('total', 0)})")
+        if output_format == "markdown":
+            return format_search_result_as_markdown(result, title=f"Patent Araması: {title or '*'}")
+        return result
+    except Exception as e:
+        error_msg = f"Patent search error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        error_result = {"error": error_msg, "total": 0, "items": []}
+        if output_format == "markdown":
+            return format_search_result_as_markdown(error_result)
+        return error_result
+
+
+@mcp.tool
+async def get_patent_details(
+    application_number: Annotated[str, Field(description="Patent application number")],
+    ctx: Context = None,
+) -> dict:
+    """
+    Get detailed information about a specific patent application.
+
+    Returns full patent information including title, abstract, inventors,
+    applicant, IPC/CPC classes, priority claims, and publication dates.
+    """
+    if ctx:
+        await ctx.info(f"Fetching patent details: {application_number}")
+    try:
+        result = await get_patent_detail_core(application_number)
+        if ctx:
+            await ctx.info("Patent details retrieved")
+        return result
+    except Exception as e:
+        error_msg = f"Patent detail error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return {"error": error_msg}
+
+
+@mcp.tool
+async def batch_search_patents(
+    titles: Annotated[list, Field(description="Aranacak patent başlıklarının listesi")],
+    applicant: Annotated[Optional[str], Field(description="Tüm sorgulara uygulanacak ortak başvuru sahibi filtresi")] = None,
+    limit_per_query: Annotated[int, Field(ge=1, le=50, description="Her başlık için döndürülecek sonuç sayısı")] = 10,
+    output_format: Annotated[OutputFormat, Field(description="'json' or 'markdown'")] = "json",
+    ctx: Context = None,
+) -> Union[dict, str]:
+    """
+    Birden fazla patent başlığını TEK seferde, eş zamanlı olarak arar.
+
+    Examples:
+    - batch_search_patents(titles=["yapay zeka", "otonom araç", "pil teknolojisi"])
+    """
+    if ctx:
+        await ctx.info(f"Batch searching {len(titles)} patent titles...")
+    try:
+        kwargs = {"applicant": applicant} if applicant else {}
+        results = await batch_search_patents_core(titles=titles, limit=limit_per_query, **kwargs)
+        if ctx:
+            await ctx.info("Batch search complete")
+        if output_format == "markdown":
+            return format_batch_results_as_markdown(results, title="Toplu Patent Araması")
+        return results
+    except Exception as e:
+        error_msg = f"Batch patent search error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return {"error": error_msg}
+
+
+# --- Design Tools ---
+
+@mcp.tool
+async def search_designs(
+    design_name: Annotated[str, Field(description="Design name to search for")] = "",
+    designer: Annotated[Optional[str], Field(description="Designer name")] = None,
+    applicant: Annotated[Optional[str], Field(description="Design applicant name")] = None,
+    registration_no: Annotated[Optional[str], Field(description="Design registration number")] = None,
+    locarno_class: Annotated[Optional[str], Field(description="Locarno classification code")] = None,
+    attorney: Annotated[Optional[str], Field(description="Design attorney name")] = None,
+    bulletin_no: Annotated[Optional[str], Field(description="Resmi Tasarım Bülteni numarası ile filtrele")] = None,
+    limit: Annotated[int, Field(ge=1, le=100, description="Results per page")] = 20,
+    offset: Annotated[int, Field(ge=0, description="Pagination offset")] = 0,
+    output_format: Annotated[OutputFormat, Field(description="'json' or 'markdown'")] = "json",
+    ctx: Context = None,
+) -> Union[dict, str]:
+    """
+    Search industrial designs registered in Turkey on TURKPATENT.
+
+    Returns matching designs with registration number, design name,
+    applicant, Locarno class, and bulletin information.
+
+    Examples:
+    - search_designs(design_name="masa")
+    - search_designs(applicant="IKEA")
+    - search_designs(locarno_class="06-01")
+    """
+    if ctx:
+        await ctx.info(f"Searching designs: '{design_name or '*'}' (offset={offset})")
+    try:
+        result = await search_designs_core(
+            design_name=design_name,
+            designer=designer,
+            applicant=applicant,
+            registration_no=registration_no,
+            locarno_class=locarno_class,
+            attorney=attorney,
+            bulletin_no=bulletin_no,
+            limit=limit,
+            offset=offset,
+        )
+        if ctx:
+            await ctx.info(f"Found {len(result.get('items', []))} designs (total: {result.get('total', 0)})")
+        if output_format == "markdown":
+            return format_search_result_as_markdown(result, title=f"Tasarım Araması: {design_name or '*'}")
+        return result
+    except Exception as e:
+        error_msg = f"Design search error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        error_result = {"error": error_msg, "total": 0, "items": []}
+        if output_format == "markdown":
+            return format_search_result_as_markdown(error_result)
+        return error_result
+
+
+@mcp.tool
+async def get_design_details(
+    file_id: Annotated[str, Field(description="Design file ID from search results (e.g. '106417')")],
+    ctx: Context = None,
+) -> dict:
+    """
+    Get detailed information about a specific design application.
+
+    Use the fileId value from search_designs results to retrieve full details.
+    Returns design information including design name, designer,
+    applicant, Locarno class, registration details, and bulletin dates.
+    """
+    if ctx:
+        await ctx.info(f"Fetching design details: {file_id}")
+    try:
+        result = await get_design_detail_core(file_id)
+        if ctx:
+            await ctx.info("Design details retrieved")
+        return result
+    except Exception as e:
+        error_msg = f"Design detail error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return {"error": error_msg}
+
+
+# --- Watchlist Tools (Bülten / Duyuru Takibi) ---
+
+@mcp.tool
+async def create_trademark_watch(
+    label: Annotated[str, Field(description="Bu takip için okunabilir bir etiket, örn. 'Rakip X marka başvuruları'")],
+    trademark_name: Annotated[str, Field(description="Takip edilecek marka adı (boş bırakılabilir)")] = "",
+    holder_name: Annotated[Optional[str], Field(description="Takip edilecek hak sahibi adı")] = None,
+    nice_classes: Annotated[Optional[str], Field(description="Takip edilecek Nice sınıfları")] = None,
+    ctx: Context = None,
+) -> dict:
+    """
+    Yeni bir marka takibi (watch) oluşturur. Daha sonra check_watch veya
+    check_all_watches ile çalıştırıldığında, oluşturulduğu andan SONRA
+    çıkan yeni başvurular raporlanır.
+
+    Examples:
+    - create_trademark_watch(label="Rakip izleme", holder_name="ACME HOLDING")
+    - create_trademark_watch(label="Sınıf 9 yeni başvurular", nice_classes="9")
+    """
+    params = {
+        "trademark_name": trademark_name,
+        "holder_name": holder_name,
+        "nice_classes": nice_classes,
+    }
+    watch = create_watch_core("trademark", label, params)
+    if ctx:
+        await ctx.info(f"Watch created: {watch['id']} ({label})")
+    return watch
+
+
+@mcp.tool
+async def create_patent_watch(
+    label: Annotated[str, Field(description="Bu takip için okunabilir bir etiket")],
+    title: Annotated[str, Field(description="Takip edilecek patent başlığı/anahtar kelime")] = "",
+    applicant: Annotated[Optional[str], Field(description="Takip edilecek başvuru sahibi")] = None,
+    ipc_class: Annotated[Optional[str], Field(description="Takip edilecek IPC sınıfı")] = None,
+    ctx: Context = None,
+) -> dict:
+    """
+    Yeni bir patent takibi oluşturur.
+
+    Examples:
+    - create_patent_watch(label="ASELSAN yeni patentler", applicant="ASELSAN")
+    """
+    params = {"title": title, "applicant": applicant, "ipc_class": ipc_class}
+    watch = create_watch_core("patent", label, params)
+    if ctx:
+        await ctx.info(f"Watch created: {watch['id']} ({label})")
+    return watch
+
+
+@mcp.tool
+async def create_design_watch(
+    label: Annotated[str, Field(description="Bu takip için okunabilir bir etiket")],
+    design_name: Annotated[str, Field(description="Takip edilecek tasarım adı/anahtar kelime")] = "",
+    applicant: Annotated[Optional[str], Field(description="Takip edilecek başvuru sahibi")] = None,
+    locarno_class: Annotated[Optional[str], Field(description="Takip edilecek Locarno sınıfı")] = None,
+    ctx: Context = None,
+) -> dict:
+    """
+    Yeni bir endüstriyel tasarım takibi oluşturur.
+
+    Examples:
+    - create_design_watch(label="IKEA yeni tasarımlar", applicant="IKEA")
+    """
+    params = {"design_name": design_name, "applicant": applicant, "locarno_class": locarno_class}
+    watch = create_watch_core("design", label, params)
+    if ctx:
+        await ctx.info(f"Watch created: {watch['id']} ({label})")
+    return watch
+
+
+@mcp.tool
+async def list_watches(ctx: Context = None) -> list:
+    """Tüm kayıtlı takipleri (watch) listeler."""
+    return list_watches_core()
+
+
+@mcp.tool
+async def check_watch(
+    watch_id: Annotated[str, Field(description="check edilecek watch kimliği (create_*_watch çıktısındaki 'id')")],
+    output_format: Annotated[OutputFormat, Field(description="'json' or 'markdown'")] = "json",
+    ctx: Context = None,
+) -> Union[dict, str]:
+    """
+    Belirli bir takibi çalıştırır ve son kontrolden bu yana çıkan YENİ
+    başvuruları döndürür.
+    """
+    if ctx:
+        await ctx.info(f"Checking watch: {watch_id}")
+    try:
+        result = await check_watch_core(watch_id)
+        if ctx:
+            await ctx.info(f"Watch check complete: {result['new_count']} new item(s)")
+        if output_format == "markdown":
+            return format_watch_check_as_markdown(result)
+        return result
+    except Exception as e:
+        error_msg = f"Watch check error: {e}"
+        if ctx:
+            await ctx.error(error_msg)
+        return {"error": error_msg}
+
+
+@mcp.tool
+async def check_all_watches(
+    output_format: Annotated[OutputFormat, Field(description="'json' or 'markdown'")] = "json",
+    ctx: Context = None,
+) -> Union[list, str]:
+    """
+    Kayıtlı TÜM takipleri sırayla çalıştırır ve her biri için yeni
+    başvuruları döndürür.
+    """
+    if ctx:
+        await ctx.info("Checking all watches...")
+    results = await check_all_watches_core()
+    if ctx:
+        total_new = sum(r.get("new_count", 0) for r in results if "error" not in r)
+        await ctx.info(f"All watches checked: {total_new} new item(s) total")
+    if output_format == "markdown":
+        sections = [format_watch_check_as_markdown(r) if "error" not in r else f"### ⚠️ {r.get('label', r.get('watch_id'))}\n{r['error']}" for r in results]
+        return "\n\n".join(sections)
+    return results
+
+
+@mcp.tool
+async def delete_watch(
+    watch_id: Annotated[str, Field(description="Silinecek watch kimliği")],
+    ctx: Context = None,
+) -> dict:
+    """Bir takibi siler."""
+    deleted = delete_watch_core(watch_id)
+    if ctx:
+        await ctx.info(f"Watch {watch_id} deleted: {deleted}")
+    return {"deleted": deleted, "watch_id": watch_id}
+
+
+# --- Entry Point ---
+
+def main():
+    """Entry point for the MCP server."""
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
