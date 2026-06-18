@@ -1,0 +1,10 @@
+# Capsolver API anahtarı (reCAPTCHA v3 çözümü için zorunlu)
+# https://www.capsolver.com adresinden alınabilir
+CAPSOLVER_API_KEY=
+
+# Toplu (batch) sorgularda eş zamanlı istek sayısı (varsayılan: 3)
+# Yüksek değerler TURKPATENT/Capsolver'a yükü artırır ve maliyeti yükseltir.
+BATCH_CONCURRENCY=3
+
+# Watchlist verisinin saklanacağı dosya yolu (varsayılan: ./data/watchlist.json)
+WATCHLIST_STORE_PATH=
