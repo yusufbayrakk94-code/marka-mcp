@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY pyproject.toml .
+COPY pyproject.toml README.md .
 COPY core.py watchlist.py formatting.py mcp_server.py app.py ./
 
 RUN pip install --no-cache-dir ".[asgi]"
