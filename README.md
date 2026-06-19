@@ -1,28 +1,8 @@
-[project]
-name = "markapatent-mcp-plus"
-version = "0.1.0"
-description = "TURKPATENT Marka, Patent ve Tasarım Araştırma MCP Sunucusu (Extended)"
-readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    "fastmcp>=2.0.0",
-    "httpx>=0.27.0",
-    "cachetools>=5.3.0",
-    "pydantic>=2.0.0",
-]
+# Marka Patent MCP+
 
-[project.optional-dependencies]
-asgi = [
-    "starlette>=0.37.0",
-    "uvicorn>=0.30.0",
-]
+TURKPATENT marka, patent ve tasarım araştırma MCP sunucusu (genişletilmiş sürüm).
 
-[project.scripts]
-markapatent-mcp-plus = "mcp_server:main"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-include = ["*.py"]
+Tool listesi: search_trademarks, get_trademark_details, batch_search_trademarks,
+search_patents, get_patent_details, batch_search_patents, search_designs,
+get_design_details, create_trademark_watch, create_patent_watch,
+create_design_watch, list_watches, check_watch, check_all_watches, delete_watch.
