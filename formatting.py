@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Markdown Formatting Helpers
------------------------------
-TURKPATENT API'sinin döndürdüğü item şeması dokümante edilmediği için bu
-modül "şema bağımsız" çalışır: mümkünse API'nin verdiği `fields` meta verisini
-kullanır, yoksa ilk sonucun anahtarlarından otomatik kolon türetir.
 """
 
 from typing import Any, Optional
@@ -14,7 +10,6 @@ MAX_CELL_LEN = 60
 
 
 def _pick_columns(items: list, fields: Optional[list]) -> list:
-    """[(key, label), ...] biçiminde gösterilecek kolonları belirler."""
     if fields:
         cols = []
         for f in fields:
@@ -49,7 +44,6 @@ def _cell(value: Any) -> str:
 
 
 def format_search_result_as_markdown(result: dict, title: str = "Arama Sonuçları") -> str:
-    """Bir search_*_core() çıktısını Markdown tabloya çevirir."""
     items = result.get("items", [])
     total = result.get("total", len(items))
     fields = result.get("fields", [])
@@ -66,7 +60,7 @@ def format_search_result_as_markdown(result: dict, title: str = "Arama Sonuçlar
 
     cols = _pick_columns(items, fields)
     if not cols:
-        lines.append("_Sonuçlar gösterilemedi (alan bilgisi çözümlenemedi, output_format='json' deneyin)._")
+        lines.append("_Sonuçlar gösterilemedi (output_format='json' deneyin)._")
         return "\n".join(lines)
 
     header = " | ".join(label for _, label in cols)
@@ -81,7 +75,6 @@ def format_search_result_as_markdown(result: dict, title: str = "Arama Sonuçlar
 
 
 def format_batch_results_as_markdown(results: dict, title: str = "Toplu Arama Sonuçları") -> str:
-    """batch_search_*_core() çıktısını (query -> result dict) Markdown'a çevirir."""
     sections = [f"## {title}", ""]
     for query, result in results.items():
         sections.append(format_search_result_as_markdown(result, title=f"'{query}'"))
@@ -90,7 +83,6 @@ def format_batch_results_as_markdown(results: dict, title: str = "Toplu Arama So
 
 
 def format_watch_check_as_markdown(check_result: dict) -> str:
-    """check_watch_core() çıktısını Markdown'a çevirir."""
     lines = [
         f"### 🔔 Takip: {check_result.get('label', check_result.get('watch_id'))}",
         f"**Tarandı:** {check_result.get('checked_total', 0)} sonuç | "
