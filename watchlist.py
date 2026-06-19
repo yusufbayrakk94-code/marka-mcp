@@ -1,15 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Watchlist / Bulletin Tracking Module
--------------------------------------
-Bu modül, kullanıcının tanımladığı arama sorgularını ("watch") yerel bir
-JSON dosyasında saklar ve her kontrolde önceki sonuçlarla karşılaştırarak
-YENİ çıkan başvuruları tespit eder (örn. "VESTEL" adına yeni marka başvurusu
-geldi mi?).
-
-Basit ve bağımlılıksız tutmak için disk üzerinde JSON dosyası kullanılır.
-Üretim/çoklu-instance ortamlarda bunun yerine Redis/Postgres gibi paylaşımlı
-bir depolama önerilir (bkz. README "Üretim Notları").
 """
 
 import hashlib
@@ -24,9 +15,6 @@ STORE_PATH = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "watchlist.json"),
 )
 
-# API yanıtındaki item'larda hangi alanın "benzersiz kimlik" olduğunu bilmiyoruz
-# (orijinal projede şema dokümante edilmemiş). Bu yüzden olası adayları sırayla
-# deniyoruz; hiçbiri yoksa item içeriğinin hash'ini kimlik olarak kullanıyoruz.
 ID_CANDIDATE_KEYS = [
     "applicationNumber", "applicationNo", "fileId", "id",
     "registrationNo", "registrationNumber", "applicationId",
@@ -56,7 +44,6 @@ def save_watches(data: dict) -> None:
 
 
 def extract_item_id(item: dict) -> str:
-    """Bir arama sonucu item'ı için en iyi tahminle benzersiz kimlik üretir."""
     for key in ID_CANDIDATE_KEYS:
         value = item.get(key)
         if value:
@@ -66,11 +53,6 @@ def extract_item_id(item: dict) -> str:
 
 
 def create_watch(watch_type: str, label: str, query_params: dict) -> dict:
-    """Yeni bir takip (watch) kaydı oluşturur.
-
-    watch_type: 'trademark' | 'patent' | 'design'
-    query_params: search_*_core fonksiyonlarına geçirilecek kwargs (limit/offset hariç)
-    """
     watches = load_watches()
     watch_id = uuid.uuid4().hex[:8]
     watches[watch_id] = {
@@ -105,12 +87,6 @@ def delete_watch(watch_id: str) -> bool:
 
 
 def update_watch_state(watch_id: str, current_ids: list) -> list:
-    """Bilinen kimlik kümesini günceller, YENİ olan kimlikleri döndürür.
-
-    İlk kontrolde (known_ids boşken) hiçbir şey "yeni" sayılmaz; sadece
-    mevcut durum kayıt altına alınır (baseline). Bu, watch oluşturulduğu anda
-    var olan tüm sonuçların "yeni bildirim" olarak görünmesini engeller.
-    """
     watches = load_watches()
     if watch_id not in watches:
         raise KeyError(f"Watch not found: {watch_id}")
