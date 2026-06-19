@@ -12,6 +12,4 @@ ENV WATCHLIST_STORE_PATH=/app/data/watchlist.json
 
 EXPOSE 8000
 
-# Render (ve benzeri PaaS'lar) PORT ortam değişkenini kendi atar;
-# yoksa 8000'e düşer (örn. yerel docker run için).
 CMD uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}
