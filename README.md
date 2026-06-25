@@ -1,4 +1,4 @@
-# Marka Patent MCP+
+# Marka MCP+
 
 TURKPATENT marka, patent ve tasarım araştırma MCP sunucusu (genişletilmiş sürüm).
 
